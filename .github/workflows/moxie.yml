@@ -1,0 +1,88 @@
+name: Moxie Default Workflow
+
+env:
+  APP_NAME: sample-app
+  APP_NAMESPACE: demo
+
+on:
+  push:
+    branches: [ develop ]
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v2
+      - name: Setup Go environment
+        uses: actions/setup-go@v2.1.3
+      - name: Build Binary
+        run: go build -o ./sample-app app/main.go
+      - name: Upload a Build Artifact
+        uses: actions/upload-artifact@v2.2.3
+        with:
+          name: sample-app
+          path: ./sample-app
+          retention-days: 1
+
+  test:
+    runs-on: ubuntu-latest
+    needs: build
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v2
+      - name: Run a one-line script
+        run: echo ${{env.APP_NAME}}
+
+  docker-build-and-push:
+    runs-on: ubuntu-latest
+    needs: test
+    steps:
+      - name: Checkout 
+        uses: actions/checkout@v2
+      - name: Download a single artifact
+        uses: actions/download-artifact@v2
+        with:
+          name: sample-app
+      - name: Build Docker image
+        run: docker build . --file Dockerfile --tag ${{ env.APP_NAME }}:${{ github.sha }}
+      - name: Configure AWS credentials
+        uses: aws-actions/configure-aws-credentials@v1
+        with:
+          aws-access-key-id: ${{ secrets.MOXIE_DEV_AWS_ACCESS_KEY_ID }}
+          aws-secret-access-key: ${{ secrets.MOXIE_DEV_AWS_SECRET_ACCESS_KEY }}
+          aws-region: us-west-2
+      - name: Login to Amazon ECR
+        id: login-ecr
+        uses: aws-actions/amazon-ecr-login@v1
+      - name: Push Image
+        run: |
+          docker tag ${{ env.APP_NAME }}:${{ github.sha }} 871240604849.dkr.ecr.us-west-2.amazonaws.com/moxie-apps:${{ env.APP_NAME }}-${{ github.sha }}
+          docker push 871240604849.dkr.ecr.us-west-2.amazonaws.com/moxie-apps:${{ env.APP_NAME }}-${{ github.sha }}
+
+  deploy:
+    runs-on: ubuntu-latest
+    needs: docker-build-and-push
+    steps:
+      - uses: actions/checkout@v2
+      - name: Configure AWS credentials
+        uses: aws-actions/configure-aws-credentials@v1
+        with:
+          aws-access-key-id: ${{ secrets.MOXIE_DEV_AWS_ACCESS_KEY_ID }}
+          aws-secret-access-key: ${{ secrets.MOXIE_DEV_AWS_SECRET_ACCESS_KEY }}
+          aws-region: us-west-2
+      - name: Get EKS Token
+        run: |
+          EKS_TOKEN="$(aws eks get-token --cluster-name dev-usw2-sre | jq -r '.status.token')"
+          echo "::add-mask::$EKS_TOKEN"
+          echo "eks_token=$EKS_TOKEN" >> $GITHUB_ENV
+      - name: Deploy Service
+        run: |
+          kubectl config set-cluster dev --server https://BB2FA12371B88255230B8CC4B760DB34.sk1.us-west-2.eks.amazonaws.com 
+          kubectl config set clusters.dev.certificate-authority-data ${{ secrets.MOXIE_DEV_CLUSTER_CERT_DATA }}
+          kubectl config set-context dev --cluster dev --namespace ${{ env.APP_NAMESPACE }}
+          kubectl config use-context dev
+          helm template -f helm/sample-app/dev.values.yaml \
+          --set image.tag=${{ env.APP_NAME }}-${{ github.sha }} \
+          --set app.nameOverride=${{ env.APP_NAME }} helm/sample-app/. \
+          | kubectl --token ${{ env.eks_token }} apply -f -
