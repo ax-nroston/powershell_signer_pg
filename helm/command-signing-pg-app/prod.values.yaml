@@ -1,0 +1,10 @@
+global:
+  environment: prod
+  appPort: 8080
+
+image:
+  repository: 871240604849.dkr.ecr.us-west-2.amazonaws.com/moxie-golang-sample-app
+  tag: ea37762323789261288e640b9cb6ecd4085805ae
+
+ingress:
+  enabled: true
